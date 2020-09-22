@@ -13,6 +13,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"time"
 
 	uuid "github.com/satori/go.uuid"
@@ -142,6 +143,22 @@ func main() {
 
 	fmt.Println("using encrypt with io writer: ", wtr.String())
 
+	f, err := os.Open("READEM.md")
+	if err != nil {
+		log.Fatalln(err)
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		log.Fatalln("could'nt io.copy", err)
+	}
+
+	fmt.Printf("here's the type Before Sum: %T\n", h)
+	xb := h.Sum(nil)
+	fmt.Printf("here's the type AFTER Sum: %T\n", xb)
+	fmt.Printf("here's the value AFTER Sum: %x\n", xb)
+
 	for i := 1; i <= 64; i++ {
 		simpleKey = append(simpleKey, byte(i))
 	}
@@ -229,7 +246,7 @@ func enDecode(kye []byte, input string) ([]byte, error) {
 	}
 	buf := &bytes.Buffer{}
 	iv := make([]byte, aes.BlockSize)
-	_, err = io.ReadFull(rand.Reader, iv)
+	//_, err = io.ReadFull(rand.Reader, iv)
 
 	s := cipher.NewCTR(b, iv)
 	sw := cipher.StreamWriter{
