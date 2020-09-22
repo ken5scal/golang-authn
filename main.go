@@ -14,6 +14,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	uuid "github.com/satori/go.uuid"
@@ -108,16 +109,22 @@ type person struct {
 	First string
 }
 
+// session samples: https://github.com/GoesToEleven/SummerBootCamp/tree/master/05_golang/02/03/11_sessions
 func main() {
 
 	msg := "hello world"
+	// ---------------------------
+	// Base 64
+	// ---------------------------
 	encoded := base64.URLEncoding.EncodeToString([]byte(msg))
 	fmt.Println("base64 url encoding: ", encoded)
 	decoded, _ := base64.URLEncoding.DecodeString(encoded)
 	fmt.Println("base64 url decoding: ", string(decoded))
-
 	fmt.Println(base64.StdEncoding.EncodeToString([]byte("user:pass")))
 
+	// ---------------------------
+	// encrypt / decrypt
+	// ---------------------------
 	pwd := "pwd"
 	bs, err := bcrypt.GenerateFromPassword([]byte(pwd), bcrypt.MinCost)
 	if err != nil {
@@ -143,7 +150,10 @@ func main() {
 
 	fmt.Println("using encrypt with io writer: ", wtr.String())
 
-	f, err := os.Open("READEM.md")
+	// ---------------------------
+	// Sha256
+	// ---------------------------
+	f, err := os.Open("README.md")
 	if err != nil {
 		log.Fatalln(err)
 	}
@@ -176,6 +186,9 @@ func main() {
 
 	log.Println("logged in")
 
+	http.HandleFunc("/", hoge)
+	http.HandleFunc("/submit", fuga)
+	http.ListenAndServe(":8080", nil)
 	//http.HandleFunc("/encode", foo)
 	//http.HandleFunc("/decode", bar)
 	//http.ListenAndServe(":8080", nil)
@@ -270,4 +283,72 @@ func encryptWrite(w io.WriterTo, key []byte) (io.Writer, error) {
 	s := cipher.NewCTR(b, iv)
 	buff := &bytes.Buffer{}
 	return cipher.StreamWriter{S: s, W: buff}, nil
+}
+
+func hoge(writer http.ResponseWriter, request *http.Request) {
+	c, err := request.Cookie("session")
+	if err != nil {
+		c = &http.Cookie{}
+	}
+
+	isEqual := false
+	xs := strings.SplitN(c.Value, "|", 2)
+	if len(xs) == 2 {
+		cCode := xs[0]
+		cEmail := xs[1]
+
+		code := getCode(cEmail)
+		isEqual = hmac.Equal([]byte(cCode), []byte(code))
+	}
+
+	message := "Not logged in"
+	if isEqual {
+		message = "logged in"
+	}
+
+	html := `<!DOCTYPE html>
+<html>
+<head>
+	<meta charset="UTF-8"
+	<title>HMAC Example</title>
+</head>
+  <body>
+	<p>Cookie value: ` + c.Value + `</p>
+	<p>` + message + `</p>
+    <form action="/submit" method="post">
+      <input type="email" name="email">
+      <input type="submit">
+    </form>
+  </body>
+</html>`
+	io.WriteString(writer, html)
+}
+
+func fuga(w http.ResponseWriter, r *http.Request) {
+	fmt.Printf("--------------------- fuga function -------------")
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+
+	email := r.FormValue("email")
+	fmt.Printf("email: " + email)
+	if email == "" {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+
+	c := http.Cookie{
+		Name:  "session",
+		Value: getCode(email) + "|" + email,
+	}
+	fmt.Printf("cookie: " + c.Value)
+	http.SetCookie(w, &c)
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+func getCode(email string) string {
+	h := hmac.New(sha256.New, []byte("this is kind of key"))
+	h.Write([]byte(email))
+	return fmt.Sprintf("%x", h.Sum(nil))
 }
