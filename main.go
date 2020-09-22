@@ -1,6 +1,9 @@
 package main
 
 import (
+	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -67,6 +70,7 @@ func generateNewKey() error {
 	}
 
 	currentKid = uid.String()
+	return nil
 }
 
 func parseToken(signedToken string) (*UserClaims, error) {
@@ -104,7 +108,31 @@ type person struct {
 }
 
 func main() {
+
+	msg := "hello world"
+	encoded := base64.URLEncoding.EncodeToString([]byte(msg))
+	fmt.Println("base64 url encoding: ", encoded)
+	decoded, _ := base64.URLEncoding.DecodeString(encoded)
+	fmt.Println("base64 url decoding: ", string(decoded))
+
 	fmt.Println(base64.StdEncoding.EncodeToString([]byte("user:pass")))
+
+	pwd := "pwd"
+	bs, err := bcrypt.GenerateFromPassword([]byte(pwd), bcrypt.MinCost)
+	if err != nil {
+		log.Fatalln("could'nt bcrypt password", err)
+	}
+	bs = bs[:16]
+	r, err := enDecode(bs, msg)
+	if err != nil {
+		log.Fatalln(err)
+	}
+	fmt.Println("encrypt with AES: ", string(r))
+	r, err = enDecode(bs, string(r))
+	if err != nil {
+		log.Fatalln(err)
+	}
+	fmt.Println("decrypt with AES: ", string(r))
 
 	for i := 1; i <= 64; i++ {
 		simpleKey = append(simpleKey, byte(i))
@@ -184,4 +212,23 @@ func bar(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Println("Person:", xp1)
+}
+
+func enDecode(kye []byte, input string) ([]byte, error) {
+	b, err := aes.NewCipher(kye)
+	if err != nil {
+		return nil, fmt.Errorf("could'nt newCiper %w", err)
+	}
+	buf := &bytes.Buffer{}
+	iv := make([]byte, aes.BlockSize)
+	s := cipher.NewCTR(b, iv)
+	sw := cipher.StreamWriter{
+		S: s,
+		W: buf,
+	}
+	if _, err := sw.Write([]byte(input)); err != nil {
+		return nil, fmt.Errorf("couldn't write to streamwriter: %w", err)
+	}
+
+	return buf.Bytes(), nil
 }
