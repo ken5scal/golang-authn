@@ -134,6 +134,14 @@ func main() {
 	}
 	fmt.Println("decrypt with AES: ", string(r))
 
+	wtr := &bytes.Buffer{}
+	encWriter, err := encryptWrite(wtr, bs)
+	if _, err := io.WriteString(encWriter, msg); err != nil {
+		log.Fatalln(err)
+	}
+
+	fmt.Println("using encrypt with io writer: ", wtr.String())
+
 	for i := 1; i <= 64; i++ {
 		simpleKey = append(simpleKey, byte(i))
 	}
@@ -221,6 +229,8 @@ func enDecode(kye []byte, input string) ([]byte, error) {
 	}
 	buf := &bytes.Buffer{}
 	iv := make([]byte, aes.BlockSize)
+	_, err = io.ReadFull(rand.Reader, iv)
+
 	s := cipher.NewCTR(b, iv)
 	sw := cipher.StreamWriter{
 		S: s,
@@ -231,4 +241,16 @@ func enDecode(kye []byte, input string) ([]byte, error) {
 	}
 
 	return buf.Bytes(), nil
+}
+
+func encryptWrite(w io.WriterTo, key []byte) (io.Writer, error) {
+	b, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, fmt.Errorf("couldn't newCipher %w", err)
+	}
+
+	iv := make([]byte, aes.BlockSize)
+	s := cipher.NewCTR(b, iv)
+	buff := &bytes.Buffer{}
+	return cipher.StreamWriter{S: s, W: buff}, nil
 }
