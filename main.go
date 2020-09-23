@@ -14,7 +14,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"strings"
 	"time"
 
 	uuid "github.com/satori/go.uuid"
@@ -28,6 +27,13 @@ type UserClaims struct {
 	jwt.StandardClaims
 	SessionID int64
 }
+
+type myClaims struct {
+	jwt.StandardClaims
+	Email string
+}
+
+const myKey = "this is kind of key"
 
 func (u *UserClaims) Valid() error {
 	if !u.VerifyExpiresAt(time.Now().Unix(), true) {
@@ -291,20 +297,38 @@ func hoge(writer http.ResponseWriter, request *http.Request) {
 		c = &http.Cookie{}
 	}
 
-	isEqual := false
-	xs := strings.SplitN(c.Value, "|", 2)
-	if len(xs) == 2 {
-		cCode := xs[0]
-		cEmail := xs[1]
+	//isEqual := false
+	//xs := strings.SplitN(c.Value, "|", 2)
+	//if len(xs) == 2 {
+	//	cCode := xs[0]
+	//	cEmail := xs[1]
+	//
+	//	code := getCode(cEmail)
+	//	isEqual = hmac.Equal([]byte(cCode), []byte(code))
+	//}
 
-		code := getCode(cEmail)
-		isEqual = hmac.Equal([]byte(cCode), []byte(code))
-	}
+	ss := c.Value
+	token, err := jwt.ParseWithClaims(ss, &myClaims{}, func(t *jwt.Token) (interface{}, error) {
+		if t.Method.Alg() != jwt.SigningMethodHS256.Alg() {
+			return nil, fmt.Errorf("SOMONE Tried to hack changed signing method")
+		}
 
+		return []byte(myKey), nil
+	})
+
+	isEqual := err == nil && token.Valid
 	message := "Not logged in"
+
 	if isEqual {
 		message = "logged in"
+		claims, _ := token.Claims.(*myClaims)
+		fmt.Println(claims.Email)
+		fmt.Println(claims.ExpiresAt)
 	}
+
+	//if isEqual {
+	//	message = "logged in"
+	//}
 
 	html := `<!DOCTYPE html>
 <html>
@@ -316,7 +340,7 @@ func hoge(writer http.ResponseWriter, request *http.Request) {
 	<p>Cookie value: ` + c.Value + `</p>
 	<p>` + message + `</p>
     <form action="/submit" method="post">
-      <input type="email" name="email">
+      <input type="email" name="emailThing">
       <input type="submit">
     </form>
   </body>
@@ -331,16 +355,23 @@ func fuga(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	email := r.FormValue("email")
+	email := r.FormValue("emailThing")
 	fmt.Printf("email: " + email)
 	if email == "" {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
 
+	ss, err := getJWT(email)
+	if err != nil {
+		http.Error(w, "coludn't get JWT", http.StatusInternalServerError)
+		return
+	}
+
 	c := http.Cookie{
-		Name:  "session",
-		Value: getCode(email) + "|" + email,
+		Name: "session",
+		//Value: getCode(email) + "|" + email,
+		Value: ss,
 	}
 	fmt.Printf("cookie: " + c.Value)
 	http.SetCookie(w, &c)
@@ -351,4 +382,22 @@ func getCode(email string) string {
 	h := hmac.New(sha256.New, []byte("this is kind of key"))
 	h.Write([]byte(email))
 	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
+func getJWT(email string) (string, error) {
+
+	c := myClaims{
+		StandardClaims: jwt.StandardClaims{
+			ExpiresAt: time.Now().Add(5 * time.Minute).Unix(),
+		},
+		Email: email,
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, &c)
+	ss, err := token.SignedString([]byte(myKey))
+
+	if err != nil {
+		return "", fmt.Errorf("could'nt signed string%w", err)
+	}
+	return ss, nil
 }
