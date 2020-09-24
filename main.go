@@ -9,13 +9,13 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
-	"strings"
 	"time"
 
 	uuid "github.com/satori/go.uuid"
@@ -38,7 +38,8 @@ type user struct {
 
 type UserClaims struct {
 	jwt.StandardClaims
-	SessionID int64
+	SessionID string
+	//sid       string
 }
 
 type myClaims struct {
@@ -51,37 +52,68 @@ func (u *UserClaims) Valid() error {
 		return fmt.Errorf("Token has expired")
 	}
 
-	if u.SessionID == 0 {
+	if u.SessionID == "" {
 		return fmt.Errorf("Invalid session ID")
 	}
 
 	return nil
 }
 
-func createToken(sid string) string {
-	mac := hmac.New(sha256.New, []byte(myKey))
-	mac.Write([]byte(sid))
-	signedMac := base64.StdEncoding.EncodeToString(mac.Sum(nil))
-	return signedMac + "|" + sid
+func createToken(sid string) (string, error) {
+	fmt.Println("created sid: " + sid)
+	cc := &UserClaims{
+		StandardClaims: jwt.StandardClaims{
+			ExpiresAt: time.Now().Add(5 * time.Minute).Unix(),
+		},
+		SessionID: sid,
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, cc)
+	return token.SignedString([]byte(myKey))
+
+	//construct HMAC Sig as Token
+	//mac := hmac.New(sha256.New, []byte(myKey))
+	//mac.Write([]byte(sid))
+	//signedMac := base64.StdEncoding.EncodeToString(mac.Sum(nil))
+	//return signedMac + "|" + sid
 }
 
 func parseToken(ss string) (string, error) {
-	xs := strings.SplitN(ss, "|", 2)
-	if len(xs) != 2 {
-		return "", fmt.Errorf("stop hacking me wrong number of items in string parsetoken")
-	}
-	xb, err := base64.StdEncoding.DecodeString(xs[0])
+	fmt.Println("parsing jwt: " + ss)
+	token, err := jwt.ParseWithClaims(ss, &UserClaims{}, func(t *jwt.Token) (interface{}, error) {
+		if t.Method.Alg() != jwt.SigningMethodHS256.Alg() {
+			return nil, errors.New("parseWithClaims failed due to different alg used")
+		}
+
+		return []byte(myKey), nil
+	})
+
 	if err != nil {
-		return "", fmt.Errorf("cou;dn't parseToken decode string %w", err)
-	}
-	mac := hmac.New(sha256.New, []byte(myKey))
-	mac.Write([]byte(xs[1]))
-
-	if !hmac.Equal(xb, mac.Sum(nil)) {
-		return "", fmt.Errorf("couldn't parseTOken not equal signed sid and sid")
+		return "", fmt.Errorf("Couldn't ParseWithClaims: %w", err)
 	}
 
-	return xs[1], nil
+	if !token.Valid {
+		return "", fmt.Errorf("token not valid in parseToken")
+	}
+
+	return token.Claims.(*UserClaims).SessionID, nil
+
+	//construct HMAC Sig as Token
+	//xs := strings.SplitN(ss, "|", 2)
+	//if len(xs) != 2 {
+	//	return "", fmt.Errorf("stop hacking me wrong number of items in string parsetoken")
+	//}
+	//xb, err := base64.StdEncoding.DecodeString(xs[0])
+	//if err != nil {
+	//	return "", fmt.Errorf("cou;dn't parseToken decode string %w", err)
+	//}
+	//mac := hmac.New(sha256.New, []byte(myKey))
+	//mac.Write([]byte(xs[1]))
+	//
+	//if !hmac.Equal(xb, mac.Sum(nil)) {
+	//	return "", fmt.Errorf("couldn't parseTOken not equal signed sid and sid")
+	//}
+	//
+	//return xs[1], nil
 }
 
 //func createToken(c *UserClaims) (string, error) {
@@ -297,18 +329,21 @@ func register(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/?msg="+errorMsg, http.StatusSeeOther)
 		return
 	}
+
 	e := r.FormValue("e")
 	if e == "" {
 		errorMsg := url.QueryEscape("your email need to not be empty")
 		http.Redirect(w, r, "/?msg="+errorMsg, http.StatusSeeOther)
 		return
 	}
+
 	p := r.FormValue("p")
 	if p == "" {
 		errorMsg := url.QueryEscape("your password need to not be empty")
 		http.Redirect(w, r, "/?msg="+errorMsg, http.StatusSeeOther)
 		return
 	}
+
 	f := r.FormValue("first")
 	if f == "" {
 		errorMsg := url.QueryEscape("your first name need to not be empty")
@@ -335,12 +370,14 @@ func login(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/?msg="+msg, http.StatusSeeOther)
 		return
 	}
+
 	e := r.FormValue("e")
 	if e == "" {
 		msg := url.QueryEscape("your email need to not be empty")
 		http.Redirect(w, r, "/?msg="+msg, http.StatusSeeOther)
 		return
 	}
+
 	p := r.FormValue("p")
 	if p == "" {
 		msg := url.QueryEscape("your password need to not be empty")
@@ -362,7 +399,14 @@ func login(w http.ResponseWriter, r *http.Request) {
 
 	sUUID := uuid.NewV4().String()
 	session[sUUID] = e
-	token := createToken(sUUID)
+	token, err := createToken(sUUID)
+	if err != nil {
+		msg := url.QueryEscape("our server didn't get nough lunch and is not working 200% right now")
+		http.Redirect(w, r, "/?msg="+msg, http.StatusSeeOther)
+		return
+	}
+
+	fmt.Println("created token: " + token)
 
 	c := http.Cookie{
 		Name:  "sessionID",
