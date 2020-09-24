@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	uuid "github.com/satori/go.uuid"
@@ -23,6 +24,12 @@ import (
 
 	"github.com/dgrijalva/jwt-go"
 )
+
+const myKey = "this is kind of key"
+
+var keys = map[string]key{} // usually it's in db
+var db = map[string][]byte{}
+var session = map[string]string{}
 
 type UserClaims struct {
 	jwt.StandardClaims
@@ -33,8 +40,6 @@ type myClaims struct {
 	jwt.StandardClaims
 	Email string
 }
-
-const myKey = "this is kind of key"
 
 func (u *UserClaims) Valid() error {
 	if !u.VerifyExpiresAt(time.Now().Unix(), true) {
@@ -48,14 +53,70 @@ func (u *UserClaims) Valid() error {
 	return nil
 }
 
-func createToken(c *UserClaims) (string, error) {
-	t := jwt.NewWithClaims(jwt.SigningMethodHS512, c)
-	signedToken, err := t.SignedString(keys[currentKid].key)
-	if err != nil {
-		return "", fmt.Errorf("Error in createTOken when signing token: %w", err)
-	}
-	return signedToken, nil
+func createToken(sid string) string {
+	mac := hmac.New(sha256.New, []byte(myKey))
+	mac.Write([]byte(sid))
+	signedMac := base64.StdEncoding.EncodeToString(mac.Sum(nil))
+	return signedMac + "|" + sid
 }
+
+func parseToken(ss string) (string, error) {
+	xs := strings.SplitN(ss, "|", 2)
+	if len(xs) != 2 {
+		return "", fmt.Errorf("stop hacking me wrong number of items in string parsetoken")
+	}
+	xb, err := base64.StdEncoding.DecodeString(xs[0])
+	if err != nil {
+		return "", fmt.Errorf("cou;dn't parseToken decode string %w", err)
+	}
+	mac := hmac.New(sha256.New, []byte(myKey))
+	mac.Write([]byte(xs[1]))
+
+	if !hmac.Equal(xb, mac.Sum(nil)) {
+		return "", fmt.Errorf("couldn't parseTOken not equal signed sid and sid")
+	}
+
+	return xs[1], nil
+}
+
+//func createToken(c *UserClaims) (string, error) {
+//	t := jwt.NewWithClaims(jwt.SigningMethodHS512, c)
+//	signedToken, err := t.SignedString(keys[currentKid].key)
+//	if err != nil {
+//		return "", fmt.Errorf("Error in createTOken when signing token: %w", err)
+//	}
+//	return signedToken, nil
+//}
+
+//func parseToken(signedToken string) (*UserClaims, error) {
+//	t, err := jwt.ParseWithClaims(signedToken, &UserClaims{}, func(t *jwt.Token) (interface{}, error) {
+//		if t.Method.Alg() != jwt.SigningMethodHS512.Alg() {
+//			return nil, fmt.Errorf("Invalid signing algorithm")
+//		}
+//
+//		kid, ok := t.Header["kid"].(string)
+//		if !ok {
+//			return nil, fmt.Errorf("Invalid kid")
+//		}
+//
+//		k, ok := keys[kid] // Get from db
+//		if !ok {
+//			return nil, fmt.Errorf("Invalid simpleKey ID")
+//		}
+//
+//		return k.key, nil
+//	})
+//
+//	if err != nil {
+//		return nil, fmt.Errorf("error in parseToken while parsing token: %w", err)
+//	}
+//
+//	if !t.Valid {
+//		return nil, fmt.Errorf("Error in parseToken, token is not valid")
+//	}
+//
+//	return t.Claims.(*UserClaims), nil
+//}
 
 var currentKid = ""
 
@@ -63,9 +124,6 @@ type key struct {
 	key     []byte
 	created time.Time
 }
-
-var keys = map[string]key{} // usually it's in db
-var db = map[string][]byte{}
 
 func generateNewKey() error {
 	newKey := make([]byte, 64)
@@ -81,36 +139,6 @@ func generateNewKey() error {
 
 	currentKid = uid.String()
 	return nil
-}
-
-func parseToken(signedToken string) (*UserClaims, error) {
-	t, err := jwt.ParseWithClaims(signedToken, &UserClaims{}, func(t *jwt.Token) (interface{}, error) {
-		if t.Method.Alg() != jwt.SigningMethodHS512.Alg() {
-			return nil, fmt.Errorf("Invalid signing algorithm")
-		}
-
-		kid, ok := t.Header["kid"].(string)
-		if !ok {
-			return nil, fmt.Errorf("Invalid kid")
-		}
-
-		k, ok := keys[kid] // Get from db
-		if !ok {
-			return nil, fmt.Errorf("Invalid simpleKey ID")
-		}
-
-		return k.key, nil
-	})
-
-	if err != nil {
-		return nil, fmt.Errorf("error in parseToken while parsing token: %w", err)
-	}
-
-	if !t.Valid {
-		return nil, fmt.Errorf("Error in parseToken, token is not valid")
-	}
-
-	return t.Claims.(*UserClaims), nil
 }
 
 type person struct {
@@ -206,6 +234,24 @@ func main() {
 }
 
 func index(w http.ResponseWriter, r *http.Request) {
+	c, err := r.Cookie("sessionID")
+	if err != nil {
+		c = &http.Cookie{
+			Name:  "sessionID",
+			Value: "",
+		}
+	}
+
+	sessionID, err := parseToken(c.Value)
+	if err != nil {
+		log.Println("index parseToken", err)
+	}
+
+	var e string
+	if sessionID != "" {
+		e = session[sessionID]
+	}
+
 	msg := r.FormValue("msg")
 	fmt.Fprintf(w, `<!DOCTYPE html>
 <html lang="en">
@@ -214,6 +260,7 @@ func index(w http.ResponseWriter, r *http.Request) {
     <title>Document</title>
 </head>
 <body>
+	<h1>If you have a session, here is  the email: %s</h1>
 	<h1>If there was any error, here it is: %s</h1>
 	<h1>Register</h1>
     <form action="/register" method="POST">
@@ -228,7 +275,7 @@ func index(w http.ResponseWriter, r *http.Request) {
         <input type="submit">
     </form>
 </body>
-</html>`, msg)
+</html>`, e, msg)
 }
 
 func register(w http.ResponseWriter, r *http.Request) {
@@ -290,6 +337,17 @@ func login(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/?msg="+msg, http.StatusSeeOther)
 		return
 	}
+
+	sUUID := uuid.NewV4().String()
+	session[sUUID] = e
+	token := createToken(sUUID)
+
+	c := http.Cookie{
+		Name:  "sessionID",
+		Value: token,
+	}
+
+	http.SetCookie(w, &c)
 
 	msg := url.QueryEscape("you logged in " + e)
 	http.Redirect(w, r, "/?msg="+msg, http.StatusSeeOther)
