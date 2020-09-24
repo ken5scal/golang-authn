@@ -12,17 +12,21 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"time"
+
+	"golang.org/x/oauth2/github"
 
 	uuid "github.com/satori/go.uuid"
 
-	"golang.org/x/crypto/bcrypt"
-
 	"github.com/dgrijalva/jwt-go"
+	"golang.org/x/crypto/bcrypt"
+	"golang.org/x/oauth2"
 )
 
 const myKey = "this is kind of key"
@@ -30,7 +34,21 @@ const myKey = "this is kind of key"
 var keys = map[string]key{}       // usually it's in db
 var db = map[string]user{}        // key is email, value is user
 var session = map[string]string{} // key is sessionid, value is email
+var githubOAuthConfig = &oauth2.Config{
+	ClientID:     "4dffc8e36d60ca04926c",
+	ClientSecret: "some secret",
+	Endpoint:     github.Endpoint,
+}
+var githubConnections map[string]string
 
+//{"data":{"viewer":{"id":"MDQ6VXNlcjk3MzQzNjI="}}}
+type githubResponse struct {
+	Data struct {
+		Viewer struct {
+			ID string `json:"id"`
+		} `json:"viewer"`
+	} `json:"data"`
+}
 type user struct {
 	password []byte
 	First    string
@@ -264,10 +282,65 @@ func main() {
 	http.HandleFunc("/register", register)
 	http.HandleFunc("/login", login)
 	http.HandleFunc("/logout", logout)
+	http.HandleFunc("/oauth/github", startGithubOAuth)
+	http.HandleFunc("/oauth/receive", completeGithubOAuth)
 	http.ListenAndServe(":8080", nil)
 	//http.HandleFunc("/encode", foo)
 	//http.HandleFunc("/decode", bar)
 	//http.ListenAndServe(":8080", nil)
+}
+
+func startGithubOAuth(w http.ResponseWriter, r *http.Request) {
+	redirectURL := githubOAuthConfig.AuthCodeURL("0000") // state is associated with login attempt
+	http.Redirect(w, r, redirectURL, http.StatusSeeOther)
+}
+
+func completeGithubOAuth(w http.ResponseWriter, r *http.Request) {
+	code := r.FormValue("code")
+	state := r.FormValue("state")
+
+	if state != "0000" {
+		http.Error(w, "state is incorrect", http.StatusBadRequest)
+		return
+	}
+
+	token, err := githubOAuthConfig.Exchange(r.Context(), code)
+	if err != nil {
+		http.Error(w, "coudldn't login", http.StatusInternalServerError)
+		return
+	}
+
+	ts := githubOAuthConfig.TokenSource(r.Context(), token)
+	client := oauth2.NewClient(r.Context(), ts)
+
+	requestBody := strings.NewReader(`{"query":"query {viewer {id}}"}`)
+	resp, err := client.Post("https://api.github.com/graphql", "application/json", requestBody)
+	if err != nil {
+		http.Error(w, "couldnt get user", http.StatusInternalServerError)
+		return
+	}
+	defer resp.Body.Close()
+
+	bs, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		http.Error(w, "couldnt read github information", http.StatusInternalServerError)
+		return
+	}
+
+	var gr githubResponse
+	if err := json.NewDecoder(resp.Body).Decode(&gr); err != nil {
+		http.Error(w, "Github Invalid response", http.StatusInternalServerError)
+		return
+	}
+
+	githubID := gr.Data.Viewer.ID
+	userID, ok := githubConnections[githubID]
+	if !ok {
+		// New User - create account
+		// maybe return, maybe not, depends
+	}
+
+	// Login to account userID using JWT
 }
 
 func index(w http.ResponseWriter, r *http.Request) {
@@ -315,6 +388,13 @@ func index(w http.ResponseWriter, r *http.Request) {
     </form>
 	<h1>Log In</h1>
     <form action="/login" method="POST">
+        <input type="email" name="e">
+        <input type="password" name="p">
+        <input type="submit">
+    </form>
+	<h1>Log In w/ GitHub</h1>
+	<form action="/oauth/github" method="POST">
+		<input type="submit" value="Login With GitHub">
         <input type="email" name="e">
         <input type="password" name="p">
         <input type="submit">
@@ -629,7 +709,7 @@ func fuga(w http.ResponseWriter, r *http.Request) {
 func getCode(email string) string {
 	h := hmac.New(sha256.New, []byte("this is kind of key"))
 	h.Write([]byte(email))
-	return fmt.Sprigntf("%x", h.Sum(nil))
+	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
 func getJWT(email string) (string, error) {
