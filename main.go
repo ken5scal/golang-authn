@@ -27,9 +27,9 @@ import (
 
 const myKey = "this is kind of key"
 
-var keys = map[string]key{} // usually it's in db
-var db = map[string]user{}  // key is email, value is user
-var session = map[string]string{}
+var keys = map[string]key{}       // usually it's in db
+var db = map[string]user{}        // key is email, value is user
+var session = map[string]string{} // key is sessionid, value is email
 
 type user struct {
 	password []byte
@@ -78,7 +78,6 @@ func createToken(sid string) (string, error) {
 }
 
 func parseToken(ss string) (string, error) {
-	fmt.Println("parsing jwt: " + ss)
 	token, err := jwt.ParseWithClaims(ss, &UserClaims{}, func(t *jwt.Token) (interface{}, error) {
 		if t.Method.Alg() != jwt.SigningMethodHS256.Alg() {
 			return nil, errors.New("parseWithClaims failed due to different alg used")
@@ -264,6 +263,7 @@ func main() {
 	http.HandleFunc("/", index)
 	http.HandleFunc("/register", register)
 	http.HandleFunc("/login", login)
+	http.HandleFunc("/logout", logout)
 	http.ListenAndServe(":8080", nil)
 	//http.HandleFunc("/encode", foo)
 	//http.HandleFunc("/decode", bar)
@@ -319,6 +319,10 @@ func index(w http.ResponseWriter, r *http.Request) {
         <input type="password" name="p">
         <input type="submit">
     </form>
+	<h1>Log Out</h1>
+	<form action="/logout" method="POST">
+        <input type="submit" value="logout">
+	</form>
 </body>
 </html>`, f, e, msg)
 }
@@ -417,6 +421,31 @@ func login(w http.ResponseWriter, r *http.Request) {
 
 	msg := url.QueryEscape("you logged in " + e)
 	http.Redirect(w, r, "/?msg="+msg, http.StatusSeeOther)
+}
+
+func logout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+
+	c, err := r.Cookie("sessionID")
+	if err != nil {
+		c = &http.Cookie{
+			Name:  "sessionID",
+			Value: "",
+		}
+	}
+
+	sessionID, err := parseToken(c.Value)
+	if err != nil {
+		log.Println("index parseToken", err)
+	}
+
+	delete(session, sessionID)
+	c.MaxAge = -1
+	http.SetCookie(w, c)
+	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
 var simpleKey = []byte{}
@@ -600,7 +629,7 @@ func fuga(w http.ResponseWriter, r *http.Request) {
 func getCode(email string) string {
 	h := hmac.New(sha256.New, []byte("this is kind of key"))
 	h.Write([]byte(email))
-	return fmt.Sprintf("%x", h.Sum(nil))
+	return fmt.Sprigntf("%x", h.Sum(nil))
 }
 
 func getJWT(email string) (string, error) {
