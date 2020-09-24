@@ -28,8 +28,13 @@ import (
 const myKey = "this is kind of key"
 
 var keys = map[string]key{} // usually it's in db
-var db = map[string][]byte{}
+var db = map[string]user{}  // key is email, value is user
 var session = map[string]string{}
+
+type user struct {
+	password []byte
+	First    string
+}
 
 type UserClaims struct {
 	jwt.StandardClaims
@@ -248,8 +253,13 @@ func index(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var e string
+	var f string
 	if sessionID != "" {
 		e = session[sessionID]
+	}
+
+	if _, ok := db[e]; ok {
+		f = db[e].First
 	}
 
 	msg := r.FormValue("msg")
@@ -260,10 +270,13 @@ func index(w http.ResponseWriter, r *http.Request) {
     <title>Document</title>
 </head>
 <body>
+<h1>If you have a session, here is  the Name: %s</h1>
 	<h1>If you have a session, here is  the email: %s</h1>
 	<h1>If there was any error, here it is: %s</h1>
 	<h1>Register</h1>
     <form action="/register" method="POST">
+	<label for="first">First</label>
+	<input type="text" name="first" placeholder="First" id="first">
         <input type="email" name="e">
         <input type="password" name="p">
         <input type="submit">
@@ -275,7 +288,7 @@ func index(w http.ResponseWriter, r *http.Request) {
         <input type="submit">
     </form>
 </body>
-</html>`, e, msg)
+</html>`, f, e, msg)
 }
 
 func register(w http.ResponseWriter, r *http.Request) {
@@ -296,6 +309,12 @@ func register(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/?msg="+errorMsg, http.StatusSeeOther)
 		return
 	}
+	f := r.FormValue("first")
+	if f == "" {
+		errorMsg := url.QueryEscape("your first name need to not be empty")
+		http.Redirect(w, r, "/?msg="+errorMsg, http.StatusSeeOther)
+		return
+	}
 
 	bsp, err := bcrypt.GenerateFromPassword([]byte(p), bcrypt.DefaultCost)
 	if err != nil {
@@ -303,7 +322,10 @@ func register(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, errorMsg, http.StatusInternalServerError)
 		return
 	}
-	db[e] = bsp
+	db[e] = user{
+		First:    f,
+		password: bsp,
+	}
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
@@ -332,7 +354,7 @@ func login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := bcrypt.CompareHashAndPassword(db[e], []byte(p)); err != nil {
+	if err := bcrypt.CompareHashAndPassword(db[e].password, []byte(p)); err != nil {
 		msg := url.QueryEscape("your email or password didn't match")
 		http.Redirect(w, r, "/?msg="+msg, http.StatusSeeOther)
 		return
