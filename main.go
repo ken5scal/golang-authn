@@ -5,50 +5,51 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hmac"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"os"
-	"strings"
 	"time"
 
-	"golang.org/x/oauth2/github"
-
+	"github.com/dgrijalva/jwt-go"
 	uuid "github.com/satori/go.uuid"
 
-	"github.com/dgrijalva/jwt-go"
 	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/amazon"
 )
 
 const myKey = "this is kind of key"
+const letterBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
-var keys = map[string]key{}       // usually it's in db
-var db = map[string]user{}        // key is email, value is user
-var session = map[string]string{} // key is sessionid, value is email
-var githubOAuthConfig = &oauth2.Config{
-	ClientID:     "4dffc8e36d60ca04926c",
-	ClientSecret: "some secret",
-	Endpoint:     github.Endpoint,
-}
-var githubConnections map[string]string
+var db = map[string]user{}                 // key is email, value is user
+var oauthConnections = map[string]string{} //key is uid frm oauth provider, value should be userIDs in your own system
+var session = map[string]string{}          // key is sessionid, value is email
+var pkce_code_verifier string
+var oauthStateExp = map[string]time.Time{} // key is uuid from oauth login state, value is exp time
 
-//{"data":{"viewer":{"id":"MDQ6VXNlcjk3MzQzNjI="}}}
-type githubResponse struct {
-	Data struct {
-		Viewer struct {
-			ID string `json:"id"`
-		} `json:"viewer"`
-	} `json:"data"`
+// https://developer.amazon.com/
+var amazonOAuthConfig = &oauth2.Config{
+	ClientID:     "amzn1.application-oa2-client.32871ba0533c485dae7f0a95db3ed766",
+	ClientSecret: "some-secret",
+	Endpoint:     amazon.Endpoint,
+	Scopes:       []string{"profile"},
+	RedirectURL:  "http://localhost:8080/oauth/amazon/receive",
 }
+
+type amazonResponse struct {
+	UserID string `json:"user_id"`
+	Name   string `json:"name"`
+	Email  string `json:"email"`
+}
+
 type user struct {
 	password []byte
 	First    string
@@ -60,11 +61,6 @@ type UserClaims struct {
 	//sid       string
 }
 
-type myClaims struct {
-	jwt.StandardClaims
-	Email string
-}
-
 func (u *UserClaims) Valid() error {
 	if !u.VerifyExpiresAt(time.Now().Unix(), true) {
 		return fmt.Errorf("Token has expired")
@@ -73,6 +69,23 @@ func (u *UserClaims) Valid() error {
 	if u.SessionID == "" {
 		return fmt.Errorf("Invalid session ID")
 	}
+
+	return nil
+}
+
+func createSession(email string, w http.ResponseWriter) error {
+	sUUID := uuid.NewV4().String()
+	token, err := createToken(sUUID)
+	if err != nil {
+		return fmt.Errorf("couldn't creat token in createSession %w", err)
+	}
+
+	session[sUUID] = email // store in redis
+	http.SetCookie(w, &http.Cookie{
+		Name:  "sessionID",
+		Value: token,
+		Path:  "/",
+	})
 
 	return nil
 }
@@ -133,214 +146,23 @@ func parseToken(ss string) (string, error) {
 	//return xs[1], nil
 }
 
-//func createToken(c *UserClaims) (string, error) {
-//	t := jwt.NewWithClaims(jwt.SigningMethodHS512, c)
-//	signedToken, err := t.SignedString(keys[currentKid].key)
-//	if err != nil {
-//		return "", fmt.Errorf("Error in createTOken when signing token: %w", err)
-//	}
-//	return signedToken, nil
-//}
-
-//func parseToken(signedToken string) (*UserClaims, error) {
-//	t, err := jwt.ParseWithClaims(signedToken, &UserClaims{}, func(t *jwt.Token) (interface{}, error) {
-//		if t.Method.Alg() != jwt.SigningMethodHS512.Alg() {
-//			return nil, fmt.Errorf("Invalid signing algorithm")
-//		}
-//
-//		kid, ok := t.Header["kid"].(string)
-//		if !ok {
-//			return nil, fmt.Errorf("Invalid kid")
-//		}
-//
-//		k, ok := keys[kid] // Get from db
-//		if !ok {
-//			return nil, fmt.Errorf("Invalid simpleKey ID")
-//		}
-//
-//		return k.key, nil
-//	})
-//
-//	if err != nil {
-//		return nil, fmt.Errorf("error in parseToken while parsing token: %w", err)
-//	}
-//
-//	if !t.Valid {
-//		return nil, fmt.Errorf("Error in parseToken, token is not valid")
-//	}
-//
-//	return t.Claims.(*UserClaims), nil
-//}
-
-var currentKid = ""
-
-type key struct {
-	key     []byte
-	created time.Time
-}
-
-func generateNewKey() error {
-	newKey := make([]byte, 64)
-	if _, err := io.ReadFull(rand.Reader, newKey); err != nil {
-		return fmt.Errorf("Error in generateNewKey while genrating simpleKey: %w", err)
-	}
-
-	uid := uuid.NewV4()
-	keys[uid.String()] = key{
-		key:     newKey,
-		created: time.Now(),
-	}
-
-	currentKid = uid.String()
-	return nil
-}
-
 type person struct {
 	First string
 }
 
 // session samples: https://github.com/GoesToEleven/SummerBootCamp/tree/master/05_golang/02/03/11_sessions
 func main() {
+	simpleTest()
 
-	msg := "hello world"
-	// ---------------------------
-	// Base 64
-	// ---------------------------
-	encoded := base64.URLEncoding.EncodeToString([]byte(msg))
-	fmt.Println("base64 url encoding: ", encoded)
-	decoded, _ := base64.URLEncoding.DecodeString(encoded)
-	fmt.Println("base64 url decoding: ", string(decoded))
-	fmt.Println(base64.StdEncoding.EncodeToString([]byte("user:pass")))
-
-	// ---------------------------
-	// encrypt / decrypt
-	// ---------------------------
-	pwd := "pwd"
-	bs, err := bcrypt.GenerateFromPassword([]byte(pwd), bcrypt.MinCost)
-	if err != nil {
-		log.Fatalln("could'nt bcrypt password", err)
-	}
-	bs = bs[:16]
-	r, err := enDecode(bs, msg)
-	if err != nil {
-		log.Fatalln(err)
-	}
-	fmt.Println("encrypt with AES: ", string(r))
-	r, err = enDecode(bs, string(r))
-	if err != nil {
-		log.Fatalln(err)
-	}
-	fmt.Println("decrypt with AES: ", string(r))
-
-	wtr := &bytes.Buffer{}
-	encWriter, err := encryptWrite(wtr, bs)
-	if _, err := io.WriteString(encWriter, msg); err != nil {
-		log.Fatalln(err)
-	}
-
-	fmt.Println("using encrypt with io writer: ", wtr.String())
-
-	// ---------------------------
-	// Sha256
-	// ---------------------------
-	f, err := os.Open("README.md")
-	if err != nil {
-		log.Fatalln(err)
-	}
-	defer f.Close()
-
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		log.Fatalln("could'nt io.copy", err)
-	}
-
-	fmt.Printf("here's the type Before Sum: %T\n", h)
-	xb := h.Sum(nil)
-	fmt.Printf("here's the type AFTER Sum: %T\n", xb)
-	fmt.Printf("here's the value AFTER Sum: %x\n", xb)
-
-	for i := 1; i <= 64; i++ {
-		simpleKey = append(simpleKey, byte(i))
-	}
-
-	pass := "abcdef"
-	fmt.Println(pass)
-	hashedPass, err := hashPassword(pass)
-	if err != nil {
-		panic(err)
-	}
-
-	if err := comparePassword(pass, hashedPass); err != nil {
-		log.Fatalln("not logged in")
-	}
-
-	log.Println("logged in")
-
-	http.HandleFunc("/hoge", hoge)
-	http.HandleFunc("/submit", fuga)
 	http.HandleFunc("/", index)
 	http.HandleFunc("/register", register)
 	http.HandleFunc("/login", login)
 	http.HandleFunc("/logout", logout)
-	http.HandleFunc("/oauth/github", startGithubOAuth)
-	http.HandleFunc("/oauth/receive", completeGithubOAuth)
+	http.HandleFunc("/oauth/amazon/login", startAmazonOAuth)
+	http.HandleFunc("/oauth/amazon/receive", completeAmazonOAuth)
+	http.HandleFunc("/oauth/amazon/register", registerAmazon)
+	http.HandleFunc("/partial-register", partialRegister)
 	http.ListenAndServe(":8080", nil)
-	//http.HandleFunc("/encode", foo)
-	//http.HandleFunc("/decode", bar)
-	//http.ListenAndServe(":8080", nil)
-}
-
-func startGithubOAuth(w http.ResponseWriter, r *http.Request) {
-	redirectURL := githubOAuthConfig.AuthCodeURL("0000") // state is associated with login attempt
-	http.Redirect(w, r, redirectURL, http.StatusSeeOther)
-}
-
-func completeGithubOAuth(w http.ResponseWriter, r *http.Request) {
-	code := r.FormValue("code")
-	state := r.FormValue("state")
-
-	if state != "0000" {
-		http.Error(w, "state is incorrect", http.StatusBadRequest)
-		return
-	}
-
-	token, err := githubOAuthConfig.Exchange(r.Context(), code)
-	if err != nil {
-		http.Error(w, "coudldn't login", http.StatusInternalServerError)
-		return
-	}
-
-	ts := githubOAuthConfig.TokenSource(r.Context(), token)
-	client := oauth2.NewClient(r.Context(), ts)
-
-	requestBody := strings.NewReader(`{"query":"query {viewer {id}}"}`)
-	resp, err := client.Post("https://api.github.com/graphql", "application/json", requestBody)
-	if err != nil {
-		http.Error(w, "couldnt get user", http.StatusInternalServerError)
-		return
-	}
-	defer resp.Body.Close()
-
-	bs, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		http.Error(w, "couldnt read github information", http.StatusInternalServerError)
-		return
-	}
-
-	var gr githubResponse
-	if err := json.NewDecoder(resp.Body).Decode(&gr); err != nil {
-		http.Error(w, "Github Invalid response", http.StatusInternalServerError)
-		return
-	}
-
-	githubID := gr.Data.Viewer.ID
-	userID, ok := githubConnections[githubID]
-	if !ok {
-		// New User - create account
-		// maybe return, maybe not, depends
-	}
-
-	// Login to account userID using JWT
 }
 
 func index(w http.ResponseWriter, r *http.Request) {
@@ -392,12 +214,9 @@ func index(w http.ResponseWriter, r *http.Request) {
         <input type="password" name="p">
         <input type="submit">
     </form>
-	<h1>Log In w/ GitHub</h1>
-	<form action="/oauth/github" method="POST">
-		<input type="submit" value="Login With GitHub">
-        <input type="email" name="e">
-        <input type="password" name="p">
-        <input type="submit">
+	<h1>Log In w/ Amazon</h1>
+	<form action="/oauth/amazon/login" method="POST">
+		<input type="submit" value="Login With Amazon">
     </form>
 	<h1>Log Out</h1>
 	<form action="/logout" method="POST">
@@ -405,6 +224,160 @@ func index(w http.ResponseWriter, r *http.Request) {
 	</form>
 </body>
 </html>`, f, e, msg)
+}
+
+func startAmazonOAuth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+
+	state := uuid.NewV4().String()
+	oauthStateExp[state] = time.Now().Add(time.Minute)
+
+	ra := rand.New(rand.NewSource(time.Now().UnixNano()))
+	b := make([]byte, 43)
+	for i := range b {
+		b[i] = letterBytes[ra.Intn(len(letterBytes))]
+	}
+	pkce_code_verifier = string(b)
+
+	h := sha256.New()
+	h.Write(b)
+	codeChallenge := base64.URLEncoding.WithPadding(base64.NoPadding).EncodeToString(h.Sum(nil))
+
+	opt1 := oauth2.SetAuthURLParam("code_challenge", codeChallenge)
+	opt2 := oauth2.SetAuthURLParam("code_challenge_method", "S256")
+	redirectURL := amazonOAuthConfig.AuthCodeURL(state, opt1, opt2)
+	http.Redirect(w, r, redirectURL, http.StatusSeeOther)
+}
+
+func completeAmazonOAuth(w http.ResponseWriter, r *http.Request) {
+	code := r.FormValue("code")
+	state := r.FormValue("state")
+
+	if state == "" || code == "" {
+		msg := url.QueryEscape("state or code was empty in Amazon Login")
+		http.Redirect(w, r, "/?msg="+msg, http.StatusSeeOther)
+		return
+	}
+
+	if t, ok := oauthStateExp[state]; !ok || time.Now().After(t) {
+		msg := url.QueryEscape("state is either empty or expired")
+		http.Redirect(w, r, "/?msg="+msg, http.StatusSeeOther)
+		return
+	}
+
+	opt1 := oauth2.SetAuthURLParam("code_verifier", pkce_code_verifier)
+
+	t, err := amazonOAuthConfig.Exchange(r.Context(), code, opt1)
+	if err != nil {
+		msg := url.QueryEscape("couldn't do oauth exchange" + err.Error())
+		http.Redirect(w, r, "/?msg="+msg, http.StatusSeeOther)
+		return
+	}
+
+	ts := amazonOAuthConfig.TokenSource(r.Context(), t)
+	c := oauth2.NewClient(r.Context(), ts)
+
+	resp, err := c.Get("https://api.amazon.com/user/profile")
+	if err != nil {
+		msg := url.QueryEscape("couldnt get an amazon user" + err.Error())
+		http.Redirect(w, r, "/?msg="+msg, http.StatusSeeOther)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		msg := url.QueryEscape("status code not good: " + string(resp.StatusCode))
+		http.Redirect(w, r, "/?msg="+msg, http.StatusSeeOther)
+		return
+	}
+
+	var aws amazonResponse
+	if err := json.NewDecoder(resp.Body).Decode(&aws); err != nil {
+		http.Error(w, "AWS Invalid response", http.StatusInternalServerError)
+		return
+	}
+
+	email, ok := oauthConnections[aws.UserID]
+
+	if !ok { // then register user
+		uv := url.Values{}
+		uv.Add("sst", aws.UserID)
+		uv.Add("name", aws.Name)
+		uv.Add("email", aws.Email)
+		http.Redirect(w, r, "/partial-register?"+uv.Encode(), http.StatusSeeOther)
+	}
+
+	if err := createSession(email, w); err != nil { // if user is already registered
+		log.Println("couldn't create session in amaon", err)
+		msg := url.QueryEscape("our server din't get enough lunch whatever ")
+		http.Redirect(w, r, "/?msg="+msg, http.StatusSeeOther)
+		return
+	}
+
+	msg := url.QueryEscape("you logged in" + email)
+	http.Redirect(w, r, "/?msg="+msg, http.StatusSeeOther)
+}
+
+func partialRegister(w http.ResponseWriter, r *http.Request) {
+	oauthID := r.FormValue("sst")
+	name := r.FormValue("name")
+	email := r.FormValue("email")
+
+	if oauthID == "" {
+		log.Println("couldn't get set in partial register")
+		msg := url.QueryEscape("failed")
+		http.Redirect(w, r, "/?msg="+msg, http.StatusSeeOther)
+		return
+	}
+
+	fmt.Fprintf(w, `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Document</title>
+</head>
+<body>
+	<form action="/oauth/amazon/register" method="POST">
+		<label for="firstName">FIRST NAME</label>
+		<input type="text" name="first" id="firstName" value="%s">
+        <label for="Email">Email</label>
+		<input type="text" name="email" id="Email" value="%s">
+		<input type="hidden" name="oauthID" id="oauthID" value="%s">
+		<input type="submit" value="Register With Amazon">
+    </form>
+</body>
+</html>`, name, email, oauthID)
+}
+
+func registerAmazon(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		errorMsg := url.QueryEscape("your method was not post")
+		http.Redirect(w, r, "/?msg="+errorMsg, http.StatusSeeOther)
+		return
+	}
+
+	first := r.FormValue("first")
+	email := r.FormValue("email")
+	amazonUID := r.FormValue("oauthID")
+	if first == "" || email == "" || amazonUID == "" {
+		errorMsg := url.QueryEscape("your first, email, or OAUTHID need to not be empty")
+		http.Redirect(w, r, "/?msg="+errorMsg, http.StatusSeeOther)
+		return
+	}
+
+	db[email] = user{First: first} // register user in DB
+	oauthConnections[amazonUID] = email
+
+	if err := createSession(email, w); err != nil { // after registration (db transaction), create a session
+		errorMsg := url.QueryEscape("couldn't createSerssion")
+		http.Redirect(w, r, "/?msg="+errorMsg, http.StatusSeeOther)
+		return
+	}
+
+	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
 func register(w http.ResponseWriter, r *http.Request) {
@@ -481,23 +454,12 @@ func login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sUUID := uuid.NewV4().String()
-	session[sUUID] = e
-	token, err := createToken(sUUID)
-	if err != nil {
-		msg := url.QueryEscape("our server didn't get nough lunch and is not working 200% right now")
+	if err := createSession(e, w); err != nil {
+		log.Println("couldn't createSession in login", err)
+		msg := url.QueryEscape("our server didn't get enough lunch and is not working 200% right now. Try bak later")
 		http.Redirect(w, r, "/?msg="+msg, http.StatusSeeOther)
 		return
 	}
-
-	fmt.Println("created token: " + token)
-
-	c := http.Cookie{
-		Name:  "sessionID",
-		Value: token,
-	}
-
-	http.SetCookie(w, &c)
 
 	msg := url.QueryEscape("you logged in " + e)
 	http.Redirect(w, r, "/?msg="+msg, http.StatusSeeOther)
@@ -528,10 +490,86 @@ func logout(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
-var simpleKey = []byte{}
+func simpleTest() {
+	verifier := "5CFCAiZC0g0OA-jmBmmjTBZiyPCQsnq_2q5k9fD-aAY"
+	msg := "Fw7s3XHRVb2m1nT7s646UrYiYLMJ54as0ZIU_injyqw"
+	h2 := sha256.New()
+	h2.Write([]byte(verifier))
+	e := base64.URLEncoding.EncodeToString(h2.Sum(nil))
+	fmt.Println(e)
+
+	// ---------------------------
+	// Base 64
+	// ---------------------------
+	encoded := base64.URLEncoding.EncodeToString([]byte(msg))
+	fmt.Println("base64 url encoding: ", encoded)
+	decoded, _ := base64.URLEncoding.DecodeString(encoded)
+	fmt.Println("base64 url decoding: ", string(decoded))
+	fmt.Println(base64.StdEncoding.EncodeToString([]byte("user:pass")))
+
+	// ---------------------------
+	// encrypt / decrypt
+	// ---------------------------
+	pwd := "pwd"
+	bs, err := bcrypt.GenerateFromPassword([]byte(pwd), bcrypt.MinCost)
+	if err != nil {
+		log.Fatalln("could'nt bcrypt password", err)
+	}
+	bs = bs[:16]
+	r, err := enDecode(bs, msg)
+	if err != nil {
+		log.Fatalln(err)
+	}
+	fmt.Println("encrypt with AES: ", string(r))
+	r, err = enDecode(bs, string(r))
+	if err != nil {
+		log.Fatalln(err)
+	}
+	fmt.Println("decrypt with AES: ", string(r))
+
+	wtr := &bytes.Buffer{}
+	encWriter, err := encryptWrite(wtr, bs)
+	if _, err := io.WriteString(encWriter, msg); err != nil {
+		log.Fatalln(err)
+	}
+
+	fmt.Println("using encrypt with io writer: ", wtr.String())
+
+	// ---------------------------
+	// Sha256
+	// ---------------------------
+	f, err := os.Open("README.md")
+	if err != nil {
+		log.Fatalln(err)
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		log.Fatalln("could'nt io.copy", err)
+	}
+
+	fmt.Printf("here's the type Before Sum: %T\n", h)
+	xb := h.Sum(nil)
+	fmt.Printf("here's the type AFTER Sum: %T\n", xb)
+	fmt.Printf("here's the value AFTER Sum: %x\n", xb)
+
+	pass := "abcdef"
+	fmt.Println(pass)
+	hashedPass, err := hashPassword(pass)
+	if err != nil {
+		panic(err)
+	}
+
+	if err := comparePassword(pass, hashedPass); err != nil {
+		log.Fatalln("not logged in")
+	}
+
+	log.Println("logged in")
+}
 
 func signMessage(msg []byte) ([]byte, error) {
-	h := hmac.New(sha256.New, keys[currentKid].key)
+	h := hmac.New(sha256.New, []byte(myKey))
 	if _, err := h.Write(msg); err != nil {
 		return nil, fmt.Errorf("Error in signMessage while hasing msg : %w", err)
 	}
@@ -617,115 +655,4 @@ func encryptWrite(w io.WriterTo, key []byte) (io.Writer, error) {
 	s := cipher.NewCTR(b, iv)
 	buff := &bytes.Buffer{}
 	return cipher.StreamWriter{S: s, W: buff}, nil
-}
-
-func hoge(writer http.ResponseWriter, request *http.Request) {
-	c, err := request.Cookie("session")
-	if err != nil {
-		c = &http.Cookie{}
-	}
-
-	//isEqual := false
-	//xs := strings.SplitN(c.Value, "|", 2)
-	//if len(xs) == 2 {
-	//	cCode := xs[0]
-	//	cEmail := xs[1]
-	//
-	//	code := getCode(cEmail)
-	//	isEqual = hmac.Equal([]byte(cCode), []byte(code))
-	//}
-
-	ss := c.Value
-	token, err := jwt.ParseWithClaims(ss, &myClaims{}, func(t *jwt.Token) (interface{}, error) {
-		if t.Method.Alg() != jwt.SigningMethodHS256.Alg() {
-			return nil, fmt.Errorf("SOMONE Tried to hack changed signing method")
-		}
-
-		return []byte(myKey), nil
-	})
-
-	isEqual := err == nil && token.Valid
-	message := "Not logged in"
-
-	if isEqual {
-		message = "logged in"
-		claims, _ := token.Claims.(*myClaims)
-		fmt.Println(claims.Email)
-		fmt.Println(claims.ExpiresAt)
-	}
-
-	//if isEqual {
-	//	message = "logged in"
-	//}
-
-	html := `<!DOCTYPE html>
-<html>
-<head>
-	<meta charset="UTF-8"
-	<title>HMAC Example</title>
-</head>
-  <body>
-	<p>Cookie value: ` + c.Value + `</p>
-	<p>` + message + `</p>
-    <form action="/submit" method="post">
-      <input type="email" name="emailThing">
-      <input type="submit">
-    </form>
-  </body>
-</html>`
-	io.WriteString(writer, html)
-}
-
-func fuga(w http.ResponseWriter, r *http.Request) {
-	fmt.Printf("--------------------- fuga function -------------")
-	if r.Method != http.MethodPost {
-		http.Redirect(w, r, "/", http.StatusSeeOther)
-		return
-	}
-
-	email := r.FormValue("emailThing")
-	fmt.Printf("email: " + email)
-	if email == "" {
-		http.Redirect(w, r, "/", http.StatusSeeOther)
-		return
-	}
-
-	ss, err := getJWT(email)
-	if err != nil {
-		http.Error(w, "coludn't get JWT", http.StatusInternalServerError)
-		return
-	}
-
-	c := http.Cookie{
-		Name: "session",
-		//Value: getCode(email) + "|" + email,
-		Value: ss,
-	}
-	fmt.Printf("cookie: " + c.Value)
-	http.SetCookie(w, &c)
-	http.Redirect(w, r, "/", http.StatusSeeOther)
-}
-
-func getCode(email string) string {
-	h := hmac.New(sha256.New, []byte("this is kind of key"))
-	h.Write([]byte(email))
-	return fmt.Sprintf("%x", h.Sum(nil))
-}
-
-func getJWT(email string) (string, error) {
-
-	c := myClaims{
-		StandardClaims: jwt.StandardClaims{
-			ExpiresAt: time.Now().Add(5 * time.Minute).Unix(),
-		},
-		Email: email,
-	}
-
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, &c)
-	ss, err := token.SignedString([]byte(myKey))
-
-	if err != nil {
-		return "", fmt.Errorf("could'nt signed string%w", err)
-	}
-	return ss, nil
 }
