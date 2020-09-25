@@ -58,7 +58,6 @@ type user struct {
 type UserClaims struct {
 	jwt.StandardClaims
 	SessionID string
-	//sid       string
 }
 
 func (u *UserClaims) Valid() error {
